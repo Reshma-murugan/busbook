@@ -1,6 +1,6 @@
 package com.busreservation.bus_reservation.service;
 
-import com.busreservation.bus_reservation.dto.BookingDtos;
+import com.busreservation.bus_reservation.dto.BookingDto;
 import com.busreservation.bus_reservation.exception.BadRequestException;
 import com.busreservation.bus_reservation.exception.NotFoundException;
 import com.busreservation.bus_reservation.model.*;
@@ -8,169 +8,206 @@ import com.busreservation.bus_reservation.repository.*;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
+import java.time.LocalTime;
+import java.time.ZoneId;
 import java.util.*;
-import java.util.stream.Collectors;
 
 @Service
 public class BookingService {
 
     private final BookingRepository bookingRepository;
+    private final TripRepository tripRepository;
+    private final TripStopRepository tripStopRepository;
+    private final FareRateRepository fareRateRepository;
     private final UserRepository userRepository;
-    private final BusRepository busRepository;
-    private final StopRepository stopRepository;
-    private final PassengerRepository passengerRepository;
 
-    public BookingService(BookingRepository bookingRepository, UserRepository userRepository,
-                         BusRepository busRepository, StopRepository stopRepository,
-                         PassengerRepository passengerRepository) {
+    public BookingService(BookingRepository bookingRepository, TripRepository tripRepository,
+                         TripStopRepository tripStopRepository, FareRateRepository fareRateRepository,
+                         UserRepository userRepository) {
         this.bookingRepository = bookingRepository;
+        this.tripRepository = tripRepository;
+        this.tripStopRepository = tripStopRepository;
+        this.fareRateRepository = fareRateRepository;
         this.userRepository = userRepository;
-        this.busRepository = busRepository;
-        this.stopRepository = stopRepository;
-        this.passengerRepository = passengerRepository;
     }
 
     @Transactional
-    public BookingDtos.BookingResponse createBooking(String userEmail, BookingDtos.BookingRequest request) {
-        User user = userRepository.findByEmail(userEmail)
-                .orElseThrow(() -> new NotFoundException("User not found"));
+    public BookingDto.BookingResponse createBooking(String userEmail, BookingDto.BookingRequest request) {
+        // Validate future date and time
+        validateBookingDateTime(request.getDate(), request.getTripId(), request.getFromStopSeq());
 
-        Bus bus = busRepository.findById(request.getBusId())
-                .orElseThrow(() -> new NotFoundException("Bus not found"));
+        Trip trip = tripRepository.findById(request.getTripId())
+                .orElseThrow(() -> new NotFoundException("Trip not found"));
 
-        Stop fromStop = stopRepository.findById(request.getFromStopId())
+        if (!"Running".equals(trip.getStatus())) {
+            throw new BadRequestException("Trip is not available for booking (maintenance)");
+        }
+
+        // Get trip stops
+        List<TripStop> stops = tripStopRepository.findByTripIdOrderBySeqNoAsc(request.getTripId());
+        TripStop fromStop = stops.stream()
+                .filter(s -> s.getSeqNo().equals(request.getFromStopSeq()))
+                .findFirst()
                 .orElseThrow(() -> new NotFoundException("From stop not found"));
-
-        Stop toStop = stopRepository.findById(request.getToStopId())
+        
+        TripStop toStop = stops.stream()
+                .filter(s -> s.getSeqNo().equals(request.getToStopSeq()))
+                .findFirst()
                 .orElseThrow(() -> new NotFoundException("To stop not found"));
 
-        // Validate segment
-        if (fromStop.getSequence() >= toStop.getSequence()) {
+        if (fromStop.getSeqNo() >= toStop.getSeqNo()) {
             throw new BadRequestException("Invalid journey segment");
         }
 
-        // Check seat availability
-        Set<Integer> requestedSeats = new HashSet<>(request.getSeatIds());
-        Set<Integer> bookedSeats = getBookedSeatsForSegment(
-                request.getBusId(), request.getTripDate(), 
-                request.getFromStopId(), request.getToStopId());
+        // Check seat availability for the requested segment
+        Set<String> bookedSeats = getBookedSeatsForSegment(
+                request.getTripId(), request.getDate(), 
+                request.getFromStopSeq(), request.getToStopSeq());
 
-        for (Integer seatId : requestedSeats) {
-            if (bookedSeats.contains(seatId)) {
-                throw new BadRequestException("Seat " + seatId + " is not available");
-            }
+        if (bookedSeats.contains(request.getSeatNo())) {
+            throw new BadRequestException("Seat " + request.getSeatNo() + " is not available");
+        }
+
+        // Calculate fare
+        int distanceKm = toStop.getCumulativeKm() - fromStop.getCumulativeKm();
+        int fareAmount = calculateFare(trip.getBus().getBusType(), distanceKm);
+
+        // Get user (optional for guest bookings)
+        User user = null;
+        if (userEmail != null) {
+            user = userRepository.findByEmail(userEmail).orElse(null);
         }
 
         // Create booking
         String pnr = generatePNR();
         Booking booking = Booking.builder()
                 .pnr(pnr)
-                .user(user)
-                .bus(bus)
-                .tripDate(request.getTripDate())
-                .fromStop(fromStop)
-                .toStop(toStop)
+                .trip(trip)
+                .bookingDate(request.getDate())
+                .seatNo(request.getSeatNo())
+                .fromStopSeq(request.getFromStopSeq())
+                .toStopSeq(request.getToStopSeq())
+                .passengerName(request.getPassenger().getName())
+                .passengerPhone(request.getPassenger().getPhone())
+                .fareAmount(fareAmount)
                 .status("CONFIRMED")
-                .bookingTime(LocalDateTime.now())
+                .bookedAt(LocalDateTime.now(ZoneId.of("Asia/Kolkata")))
+                .user(user)
                 .build();
 
         booking = bookingRepository.save(booking);
 
-        // Create passengers
-        List<Passenger> passengers = new ArrayList<>();
-        for (BookingDtos.PassengerInfo passengerInfo : request.getPassengers()) {
-            Passenger passenger = Passenger.builder()
-                    .booking(booking)
-                    .name(passengerInfo.getName())
-                    .age(passengerInfo.getAge())
-                    .gender(passengerInfo.getGender())
-                    .seatNo(passengerInfo.getSeatNo())
-                    .build();
-            passengers.add(passenger);
-        }
+        // Build booking details
+        BookingDto.BookingDetails details = BookingDto.BookingDetails.builder()
+                .busId(trip.getBus().getBusId())
+                .busType(trip.getBus().getBusType())
+                .travelDate(request.getDate())
+                .fromStop(fromStop.getStopName())
+                .toStop(toStop.getStopName())
+                .seatNo(request.getSeatNo())
+                .passenger(request.getPassenger())
+                .build();
 
-        passengerRepository.saveAll(passengers);
-        booking.setPassengers(passengers);
-
-        return BookingDtos.BookingResponse.builder()
-                .bookingId(booking.getId())
+        return BookingDto.BookingResponse.builder()
+                .bookingId(booking.getBookingId())
                 .pnr(booking.getPnr())
                 .status(booking.getStatus())
-                .bookingTime(booking.getBookingTime())
+                .fareAmount(booking.getFareAmount())
+                .bookedAt(booking.getBookedAt())
+                .details(details)
                 .build();
     }
 
-    public List<BookingDtos.BookingHistoryResponse> getUserBookings(String userEmail) {
-        User user = userRepository.findByEmail(userEmail)
-                .orElseThrow(() -> new NotFoundException("User not found"));
+    public BookingDto.BookingResponse getBookingByPnr(String pnr) {
+        Booking booking = bookingRepository.findByPnr(pnr)
+                .orElseThrow(() -> new NotFoundException("Booking not found"));
 
-        List<Booking> bookings = bookingRepository.findByUserIdOrderByBookingTimeDesc(user.getId());
+        Trip trip = booking.getTrip();
+        List<TripStop> stops = tripStopRepository.findByTripIdOrderBySeqNoAsc(trip.getId());
+        
+        TripStop fromStop = stops.stream()
+                .filter(s -> s.getSeqNo().equals(booking.getFromStopSeq()))
+                .findFirst().orElse(null);
+        
+        TripStop toStop = stops.stream()
+                .filter(s -> s.getSeqNo().equals(booking.getToStopSeq()))
+                .findFirst().orElse(null);
 
-        return bookings.stream()
-                .map(booking -> {
-                    List<Integer> seats = booking.getPassengers().stream()
-                            .map(Passenger::getSeatNo)
-                            .sorted()
-                            .collect(Collectors.toList());
+        BookingDto.BookingDetails details = BookingDto.BookingDetails.builder()
+                .busId(trip.getBus().getBusId())
+                .busType(trip.getBus().getBusType())
+                .travelDate(booking.getBookingDate())
+                .fromStop(fromStop != null ? fromStop.getStopName() : "Unknown")
+                .toStop(toStop != null ? toStop.getStopName() : "Unknown")
+                .seatNo(booking.getSeatNo())
+                .passenger(BookingDto.PassengerInfo.builder()
+                        .name(booking.getPassengerName())
+                        .phone(booking.getPassengerPhone())
+                        .build())
+                .build();
 
-                    List<BookingDtos.PassengerInfo> passengerInfos = booking.getPassengers().stream()
-                            .map(p -> new BookingDtos.PassengerInfo(p.getName(), p.getAge(), p.getGender(), p.getSeatNo()))
-                            .collect(Collectors.toList());
-
-                    return BookingDtos.BookingHistoryResponse.builder()
-                            .id(booking.getId())
-                            .pnr(booking.getPnr())
-                            .busName(booking.getBus().getName())
-                            .tripDate(booking.getTripDate())
-                            .fromStop(booking.getFromStop().getName())
-                            .toStop(booking.getToStop().getName())
-                            .status(booking.getStatus())
-                            .bookingTime(booking.getBookingTime())
-                            .seats(seats)
-                            .passengers(passengerInfos)
-                            .build();
-                })
-                .collect(Collectors.toList());
+        return BookingDto.BookingResponse.builder()
+                .bookingId(booking.getBookingId())
+                .pnr(booking.getPnr())
+                .status(booking.getStatus())
+                .fareAmount(booking.getFareAmount())
+                .bookedAt(booking.getBookedAt())
+                .details(details)
+                .build();
     }
 
-    private Set<Integer> getBookedSeatsForSegment(Long busId, java.time.LocalDate date, Long fromStopId, Long toStopId) {
-        List<Booking> bookings = bookingRepository.findByBusIdAndTripDate(busId, date);
-        Set<Integer> bookedSeats = new HashSet<>();
+    private void validateBookingDateTime(LocalDate date, Long tripId, Integer fromStopSeq) {
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
+        if (date.isBefore(today)) {
+            throw new BadRequestException("Cannot book for past dates");
+        }
 
-        Map<Long, Integer> stopSequences = stopRepository.findByBusIdOrderBySequenceAsc(busId)
-                .stream()
-                .collect(Collectors.toMap(Stop::getId, Stop::getSequence));
+        // If booking for today, check departure time
+        if (date.equals(today)) {
+            List<TripStop> stops = tripStopRepository.findByTripIdOrderBySeqNoAsc(tripId);
+            TripStop fromStop = stops.stream()
+                    .filter(s -> s.getSeqNo().equals(fromStopSeq))
+                    .findFirst().orElse(null);
+            
+            if (fromStop != null && fromStop.getDepartTime() != null) {
+                LocalTime now = LocalTime.now(ZoneId.of("Asia/Kolkata"));
+                if (fromStop.getDepartTime().isBefore(now)) {
+                    throw new BadRequestException("Cannot book for past departure times");
+                }
+            }
+        }
+    }
 
-        Integer requestFromSeq = stopSequences.get(fromStopId);
-        Integer requestToSeq = stopSequences.get(toStopId);
+    private Set<String> getBookedSeatsForSegment(Long tripId, LocalDate date, Integer fromSeq, Integer toSeq) {
+        List<Booking> bookings = bookingRepository.findByTripIdAndBookingDateAndStatus(tripId, date, "CONFIRMED");
+        Set<String> bookedSeats = new HashSet<>();
 
         if (requestFromSeq == null || requestToSeq == null) {
             return bookedSeats;
-        }
 
-        for (Booking booking : bookings) {
-            if (!"CONFIRMED".equals(booking.getStatus())) continue;
-
-            Integer bookingFromSeq = stopSequences.get(booking.getFromStop().getId());
-            Integer bookingToSeq = stopSequences.get(booking.getToStop().getId());
-
-            if (bookingFromSeq != null && bookingToSeq != null) {
-                // Check if segments overlap
-                if (requestFromSeq < bookingToSeq && bookingFromSeq < requestToSeq) {
-                    booking.getPassengers().forEach(passenger -> 
-                            bookedSeats.add(passenger.getSeatNo()));
-                }
+            // Check if segments overlap: [fromSeq, toSeq) overlaps with [booking.fromSeq, booking.toSeq)
+            if (fromSeq < booking.getToStopSeq() && booking.getFromStopSeq() < toSeq) {
+                bookedSeats.add(booking.getSeatNo());
             }
         }
 
         return bookedSeats;
     }
 
+    private int calculateFare(String busType, int distanceKm) {
+        FareRate fareRate = fareRateRepository.findById(busType).orElse(null);
+        if (fareRate == null) {
+            return distanceKm * 2; // Default ₹2 per km
+        }
+        
+        BigDecimal fare = fareRate.getRatePerKm().multiply(BigDecimal.valueOf(distanceKm));
+        return fare.intValue();
+    }
+
     private String generatePNR() {
-        String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMddHHmmss"));
-        String random = String.format("%04d", new Random().nextInt(10000));
-        return "BUS" + timestamp.substring(8) + random;
+        return "MGT" + System.currentTimeMillis() + String.format("%03d", new Random().nextInt(1000));
     }
 }

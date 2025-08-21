@@ -5,8 +5,6 @@ import lombok.*;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.List;
 
 @Data
 @NoArgsConstructor
@@ -17,37 +15,43 @@ import java.util.List;
 public class Booking {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
+    private Long bookingId;
 
     @Column(nullable = false, unique = true)
     private String pnr;
 
     @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "user_id", nullable = false)
-    private User user;
-
-    @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "bus_id", nullable = false)
-    private Bus bus;
+    @JoinColumn(name = "trip_id", nullable = false)
+    private Trip trip;
 
     @Column(nullable = false)
-    private LocalDate tripDate;
+    private LocalDate bookingDate; // actual travel date
 
-    @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "from_stop_id", nullable = false)
-    private Stop fromStop;
+    @Column(nullable = false)
+    private String seatNo;
 
-    @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "to_stop_id", nullable = false)
-    private Stop toStop;
+    @Column(nullable = false)
+    private Integer fromStopSeq;
+
+    @Column(nullable = false)
+    private Integer toStopSeq;
+
+    @Column(nullable = false)
+    private String passengerName;
+
+    @Column(nullable = false)
+    private String passengerPhone;
+
+    @Column(nullable = false)
+    private Integer fareAmount;
 
     @Column(nullable = false)
     private String status; // CONFIRMED, CANCELLED
 
     @Column(nullable = false)
-    private LocalDateTime bookingTime;
+    private LocalDateTime bookedAt;
 
-    @OneToMany(mappedBy = "booking", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
-    @Builder.Default
-    private List<Passenger> passengers = new ArrayList<>();
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "user_id")
+    private User user; // optional for guest bookings
 }

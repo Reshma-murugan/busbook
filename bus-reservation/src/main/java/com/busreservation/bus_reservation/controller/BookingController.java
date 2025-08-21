@@ -1,15 +1,14 @@
 package com.busreservation.bus_reservation.controller;
 
-import com.busreservation.bus_reservation.dto.BookingDtos;
+import com.busreservation.bus_reservation.dto.BookingDto;
 import com.busreservation.bus_reservation.service.BookingService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.List;
 
 @RestController
-@RequestMapping("/api")
+@RequestMapping("/bookings")
 public class BookingController {
 
     private final BookingService bookingService;
@@ -18,20 +17,19 @@ public class BookingController {
         this.bookingService = bookingService;
     }
 
-    @PostMapping("/bookings")
-    public ResponseEntity<BookingDtos.BookingResponse> createBooking(
+    @PostMapping
+    public ResponseEntity<BookingDto.BookingResponse> createBooking(
             Authentication authentication,
-            @RequestBody BookingDtos.BookingRequest request
+            @RequestBody BookingDto.BookingRequest request
     ) {
-        String userEmail = authentication.getName();
+        String userEmail = authentication != null ? authentication.getName() : null;
         return ResponseEntity.ok(bookingService.createBooking(userEmail, request));
     }
 
-    @GetMapping("/user/bookings")
-    public ResponseEntity<List<BookingDtos.BookingHistoryResponse>> getUserBookings(
-            Authentication authentication
+    @GetMapping("/{pnr}")
+    public ResponseEntity<BookingDto.BookingResponse> getBookingByPnr(
+            @PathVariable String pnr
     ) {
-        String userEmail = authentication.getName();
-        return ResponseEntity.ok(bookingService.getUserBookings(userEmail));
+        return ResponseEntity.ok(bookingService.getBookingByPnr(pnr));
     }
 }

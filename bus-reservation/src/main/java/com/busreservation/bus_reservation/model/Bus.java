@@ -14,20 +14,18 @@ import java.util.List;
 @Table(name = "buses")
 public class Bus {
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
+    private String busId; // From Excel: B001, B002, etc.
 
     @Column(nullable = false)
-    private String name; // Travel name
+    private String busType; // "Non-AC Seater", "AC Sleeper", etc.
 
     @Column(nullable = false)
-    private String type; // AC / Non-AC
+    private Integer capacity;
 
-    @Column(nullable = false)
-    private Integer totalSeats; // e.g., 28
+    @Column
+    private String homeDepot;
 
     @OneToMany(mappedBy = "bus", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
-    @OrderBy("sequence ASC")
     @Builder.Default
-    private List<Stop> stops = new ArrayList<>();
+    private List<Seat> seats = new ArrayList<>();
 }
