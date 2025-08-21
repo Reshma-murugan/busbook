@@ -1,3 +1,4 @@
+//buscard
 import { Link } from 'react-router-dom';
 import './BusCard.css';
 
